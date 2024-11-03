@@ -1,8 +1,3 @@
-"""This is the original code from the DCA package."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import pickle
 
 import numpy as np
@@ -10,6 +5,7 @@ import scipy as sp
 import pandas as pd
 import scanpy as sc
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import scale
 
 
 #TODO: Fix this
@@ -67,7 +63,6 @@ def read_dataset(adata, transpose=False, test_split=False, copy=False, check_cou
     print('dca: Successfully preprocessed {} genes and {} cells.'.format(adata.n_vars, adata.n_obs))
 
     return adata
-
 
 def normalize(adata, filter_min_counts=True, size_factors=True, normalize_input=True, logtrans_input=True):
 
