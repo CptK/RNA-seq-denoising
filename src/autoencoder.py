@@ -79,7 +79,7 @@ class PoissonAutoencoder(BaseAutoencoder):
     def forward(self, x, size_factors):
         encoded = self.encoder(x)
         decoded = self.decoder(encoded)
-        mean = self.mean_layer(decoded) * size_factors.unsqueeze(1)
+        mean = self.mean_layer(decoded) * size_factors
         return mean
 
 class NBAutoencoder(BaseAutoencoder):
@@ -96,7 +96,7 @@ class NBAutoencoder(BaseAutoencoder):
     def forward(self, x, size_factors):
         encoded = self.encoder(x)
         decoded = self.decoder(encoded)
-        mean = self.mean_layer(decoded) * size_factors.unsqueeze(1)
+        mean = self.mean_layer(decoded) * size_factors
         dispersion = self.dispersion_layer(decoded)
         return mean, dispersion
 
@@ -118,7 +118,7 @@ class ZINBAutoencoder(BaseAutoencoder):
     def forward(self, x, size_factors):
         encoded = self.encoder(x)
         decoded = self.decoder(encoded)
-        mean = self.mean_layer(decoded) * size_factors.unsqueeze(1)
+        mean = self.mean_layer(decoded) * size_factors
         dispersion = self.dispersion_layer(decoded)
         dropout = self.dropout_layer(decoded)
         return mean, dispersion, dropout
