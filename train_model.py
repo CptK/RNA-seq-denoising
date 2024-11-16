@@ -6,8 +6,8 @@ from torch import optim
 import numpy as np
 from tqdm import tqdm
 
-from src.autoencoder import NBAutoencoder, ZINBAutoencoder, PoissonAutoencoder
-from src.loss import poisson_loss, NB, ZINB  # poisson_loss is a function, NB and ZINB are classes
+from src.autoencoder import NBAutoencoder, ZINBAutoencoder, PoissonAutoencoder, ZINBVariationalAutoEnocder
+from src.loss import Poisson, NB, ZINB, ZINBVariational
 from src.data import read_dataset, normalize
 
 import matplotlib.pyplot as plt
@@ -43,8 +43,16 @@ def get_model(model_type: str, input_dim: int, encoder_sizes, bottleneck_size, d
             decoder_sizes=decoder_sizes,
             dropout_rate=dropout_rate
         )
-    else:
+    elif model_type == 'poisson':
         model = PoissonAutoencoder(
+            input_size=input_dim,
+            encoder_sizes=encoder_sizes,
+            bottleneck_size=bottleneck_size,
+            decoder_sizes=decoder_sizes,
+            dropout_rate=dropout_rate
+        )
+    else:
+        model = ZINBVariationalAutoEnocder(
             input_size=input_dim,
             encoder_sizes=encoder_sizes,
             bottleneck_size=bottleneck_size,
@@ -54,7 +62,18 @@ def get_model(model_type: str, input_dim: int, encoder_sizes, bottleneck_size, d
     return model
 
 
-def train_epoch(model, train_loader, optimizer, epoch, epochs, device):
+def get_criterion(model_type: str, **kwargs):
+    if model_type == "zinb":
+        return ZINB(**kwargs)
+    elif model_type == "nb":
+        return NB(**kwargs)
+    elif model_type == "poisson":
+        return Poisson()
+    else:
+        return ZINBVariational(**kwargs)
+
+
+def train_epoch(model, criterion, train_loader, optimizer, epoch, epochs, device):
     model.train()
     total_loss = 0
     
@@ -66,17 +85,18 @@ def train_epoch(model, train_loader, optimizer, epoch, epochs, device):
             batch_y = batch_y.to(device)
             
             # Forward pass
-            if isinstance(model, ZINBAutoencoder):
+            if type(model) is ZINBAutoencoder:
                 mean, disp, pi = model(batch_x, batch_sf)
-                zinb = ZINB(pi=pi, theta=disp)
-                loss = zinb.loss(batch_y, mean)
-            elif isinstance(model, NBAutoencoder):
+                loss = criterion(batch_y, mean, theta=disp, pi=pi)
+            elif type(model) is NBAutoencoder:
                 mean, disp = model(batch_x, batch_sf)
-                nb = NB(theta=disp)
-                loss = nb.loss(batch_y, mean)
-            else:  # PoissonAutoencoder
+                loss = criterion(batch_y, mean, theta=disp)
+            elif type(model) is PoissonAutoencoder:
                 mean = model(batch_x, batch_sf)
-                loss = poisson_loss(batch_y, mean)
+                loss = criterion(batch_y, mean)
+            elif type(model) is ZINBVariationalAutoEnocder:
+                mean, disp, pi, _, z_mean, z_log_var = model(batch_x, batch_sf)
+                loss = criterion(batch_y, mean, z_mean, z_log_var, theta=disp, pi=pi)
             
             # Backward pass
             optimizer.zero_grad()
@@ -90,7 +110,7 @@ def train_epoch(model, train_loader, optimizer, epoch, epochs, device):
     return total_loss / len(train_loader)
 
 
-def train_model(model, epochs, train_loader, val_loader, optimizer, scheduler, device):
+def train_model(model, epochs, train_loader, val_loader, optimizer, criterion, scheduler, device):
     best_val_loss = float('inf')
     early_stopping_patience = 20
     early_stopping_counter = 0
@@ -99,11 +119,11 @@ def train_model(model, epochs, train_loader, val_loader, optimizer, scheduler, d
 
     for epoch in range(epochs):
         # Train
-        train_loss = train_epoch(model, train_loader, optimizer, epoch, epochs, device)
+        train_loss = train_epoch(model, criterion, train_loader, optimizer, epoch, epochs, device)
         train_losses.append(train_loss)
         
         # Validate
-        val_loss = validate(model, val_loader, device)
+        val_loss = validate(model, val_loader, criterion, device)
         val_losses.append(val_loss)
         
         # Print metrics
@@ -135,7 +155,7 @@ def train_model(model, epochs, train_loader, val_loader, optimizer, scheduler, d
 
 
 @torch.no_grad()
-def validate(model, val_loader, device):
+def validate(model, val_loader, criterion, device):
     model.eval()
     total_loss = 0
     
@@ -144,17 +164,18 @@ def validate(model, val_loader, device):
         batch_sf = batch_sf.to(device)
         batch_y = batch_y.to(device)
         
-        if isinstance(model, ZINBAutoencoder):
+        if type(model) is ZINBAutoencoder:
             mean, disp, pi = model(batch_x, batch_sf)
-            zinb = ZINB(pi=pi, theta=disp)
-            loss = zinb.loss(batch_y, mean)
-        elif isinstance(model, NBAutoencoder):
+            loss = criterion(batch_y, mean, theta=disp, pi=pi)
+        elif type(model) is NBAutoencoder:
             mean, disp = model(batch_x, batch_sf)
-            nb = NB(theta=disp)
-            loss = nb.loss(batch_y, mean)
-        else:
+            loss = criterion(batch_y, mean, theta=disp)
+        elif type(model) is PoissonAutoencoder:
             mean = model(batch_x, batch_sf)
-            loss = poisson_loss(batch_y, mean)
+            loss = criterion(batch_y, mean)
+        elif type(model) is ZINBVariationalAutoEnocder:
+            mean, disp, pi, _, z_mean, z_log_var = model(batch_x, batch_sf)
+            loss = criterion(batch_y, mean, z_mean, z_log_var, theta=disp, pi=pi)
             
         total_loss += loss.item()
     
@@ -194,10 +215,11 @@ if __name__ == '__main__':
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.1, patience=10, verbose=True
     )
+    criterion = get_criterion(MODEL_TYPE)
     
     # Training loop
     best_val_loss, train_losses, val_losses = train_model(
-        model, EPOCHS, train_loader, val_loader, optimizer, scheduler, DEVICE
+        model, EPOCHS, train_loader, val_loader, optimizer, criterion, scheduler, DEVICE
     )
     
     plt.plot(train_losses, label='Train Loss')

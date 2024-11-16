@@ -56,33 +56,36 @@ def _reduce_mean(x):
     x = _nan2zero(x)
     return torch.sum(x) / nelem
 
+class Poisson:
+    def loss(self, y_true, y_pred):
+        """
+        Compute the Poisson loss between true and predicted values.
 
-def poisson_loss(y_true, y_pred):
-    """
-    Compute the Poisson loss between true and predicted values.
+        This loss is suitable for count data following a Poisson distribution. It handles NaN values in the true
+        values.
 
-    This loss is suitable for count data following a Poisson distribution. It handles NaN values in the true
-    values.
+        Args:
+            y_true (torch.Tensor): True values.
+            y_pred (torch.Tensor): Predicted values.
 
-    Args:
-        y_true (torch.Tensor): True values.
-        y_pred (torch.Tensor): Predicted values.
+        Returns:
+            torch.Tensor: Scalar tensor containing the mean Poisson loss.
 
-    Returns:
-        torch.Tensor: Scalar tensor containing the mean Poisson loss.
+        Note:
+            The function adds a small epsilon (1e-10) to the predicted values to prevent log(0) errors.
+        """
+        y_pred = y_pred.float()
+        y_true = y_true.float()
 
-    Note:
-        The function adds a small epsilon (1e-10) to the predicted values to prevent log(0) errors.
-    """
-    y_pred = y_pred.float()
-    y_true = y_true.float()
+        nelem = _nelem(y_true)
+        y_true = _nan2zero(y_true)
 
-    nelem = _nelem(y_true)
-    y_true = _nan2zero(y_true)
+        ret = y_pred - y_true * torch.log(y_pred + 1e-10) + torch.lgamma(y_true + 1.0)
 
-    ret = y_pred - y_true * torch.log(y_pred + 1e-10) + torch.lgamma(y_true + 1.0)
-
-    return torch.sum(ret) / nelem
+        return torch.sum(ret) / nelem
+    
+    def __call__(self, y_true, y_pred):
+        return self.loss(y_true, y_pred)
 
 
 class NB:
@@ -101,16 +104,15 @@ class NB:
         eps (float): Small value to prevent division by zero and log(0) errors.
 
     """
-    def __init__(self, theta=None, masking=False, scope='nbinom_loss/',
+    def __init__(self, masking=False, scope='nbinom_loss/',
                  scale_factor=1.0, debug=False):
         self.eps = 1e-10
         self.scale_factor = scale_factor
         self.debug = debug
         self.scope = scope
         self.masking = masking
-        self.theta = theta
 
-    def loss(self, y_true, y_pred, mean=True):
+    def loss(self, y_true, y_pred, theta, mean=True):
         """
         Compute the Negative Binomial loss between true and predicted values.
 
@@ -139,7 +141,7 @@ class NB:
             nelem = _nelem(y_true)
             y_true = _nan2zero(y_true)
 
-        theta = torch.clamp(self.theta, max=1e6)
+        theta = torch.clamp(theta, max=1e6)
 
         t1 = torch.lgamma(theta + eps) + torch.lgamma(y_true + 1.0) - torch.lgamma(y_true + theta + eps)
         t2 = (theta + y_true) * torch.log(1.0 + (y_pred / (theta + eps))) + (y_true * (torch.log(theta + eps) - torch.log(y_pred + eps)))
@@ -159,6 +161,9 @@ class NB:
                 final = torch.mean(final)
 
         return final
+    
+    def __call__(self, y_true, y_pred, theta):
+        return self.loss(y_true, y_pred, theta)
 
 
 class ZINB(NB):
@@ -174,12 +179,11 @@ class ZINB(NB):
 
     Inherits all attributes from the NB class.
     """
-    def __init__(self, pi, ridge_lambda=0.0, scope='zinb_loss/', **kwargs):
+    def __init__(self, ridge_lambda=0.0, scope='zinb_loss/', **kwargs):
         super().__init__(scope=scope, **kwargs)
-        self.pi = pi
         self.ridge_lambda = ridge_lambda
 
-    def loss(self, y_true, y_pred, mean=True):
+    def loss(self, y_true, y_pred, theta, pi, mean=True):
         """
         Compute the Zero-Inflated Negative Binomial loss between true and predicted values.
 
@@ -204,16 +208,16 @@ class ZINB(NB):
         scale_factor = self.scale_factor
         eps = self.eps
 
-        nb_case = super().loss(y_true, y_pred, mean=False) - torch.log(1.0 - self.pi + eps)
+        nb_case = super().loss(y_true, y_pred, theta, mean=False) - torch.log(1.0 - pi + eps)
 
         y_true = y_true.float()
         y_pred = y_pred.float() * scale_factor
-        theta = torch.clamp(self.theta, max=1e6)
+        theta = torch.clamp(theta, max=1e6)
 
         zero_nb = torch.pow(theta / (theta + y_pred + eps), theta)
-        zero_case = -torch.log(self.pi + ((1.0 - self.pi) * zero_nb) + eps)
+        zero_case = -torch.log(pi + ((1.0 - pi) * zero_nb) + eps)
         result = torch.where(y_true < 1e-8, zero_case, nb_case)
-        ridge = self.ridge_lambda * torch.square(self.pi)
+        ridge = self.ridge_lambda * torch.square(pi)
         result += ridge
 
         if mean:
@@ -225,3 +229,34 @@ class ZINB(NB):
         result = _nan2inf(result)
 
         return result
+    
+    def __call__(self, y_true, y_pred, theta, pi):
+        return self.loss(y_true, y_pred, theta, pi)
+    
+
+class ZINBVariational(ZINB):
+    def __init__(self, beta=1.0, ridge_lambda=0.0, scope='zinb_vae_loss/', **kwargs):
+        super().__init__(ridge_lambda=ridge_lambda, scope=scope, **kwargs)
+        self.beta = beta  # KL weight factor
+
+    def loss(self, y_true, y_pred, z_mean, z_log_var, theta, pi, mean=True):
+        """
+        Compute combined ZINB and KL loss.
+        
+        Args:
+            y_true (torch.Tensor): True values
+            y_pred (torch.Tensor): Predicted values
+            z_mean (torch.Tensor): Mean of latent space
+            z_log_var (torch.Tensor): Log variance of latent space
+            mean (bool): Whether to return mean loss
+        """
+        reconstruction_loss = super().loss(y_true, y_pred, theta, pi, mean=mean)
+        kl_loss = -0.5 * torch.sum(1 + z_log_var - z_mean.pow(2) - z_log_var.exp())
+        
+        if mean:
+            kl_loss = kl_loss / y_true.size(0) # Average over batch
+            
+        return reconstruction_loss + self.beta * kl_loss
+    
+    def __call__(self, y_true, y_pred, z_mean, z_log_var, theta, pi):
+        return self.loss(y_true, y_pred, z_mean, z_log_var, theta, pi)

@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
 
@@ -15,10 +16,10 @@ class BaseAutoencoder(nn.Module, ABC):
         self.input_size = input_size
         
         # Build encoder
-        encoder_layers = []
+        self.encoder_layers = []
         prev_size = input_size
         for h_size in encoder_sizes:
-            encoder_layers.extend([
+            self.encoder_layers.extend([
                 nn.Linear(prev_size, h_size),
                 nn.BatchNorm1d(h_size),
                 nn.ReLU(),
@@ -27,14 +28,14 @@ class BaseAutoencoder(nn.Module, ABC):
             prev_size = h_size
             
         # Add bottleneck
-        encoder_layers.extend([
+        self.encoder_layers.extend([
             nn.Linear(prev_size, bottleneck_size),
             nn.BatchNorm1d(bottleneck_size),
             nn.ReLU(),
             nn.Dropout(dropout_rate)
         ])
         
-        self.encoder = nn.Sequential(*encoder_layers)
+        self.encoder = nn.Sequential(*self.encoder_layers)
         
         # Build decoder
         decoder_layers = []
@@ -121,6 +122,42 @@ class ZINBAutoencoder(BaseAutoencoder):
         dispersion = self.dispersion_layer(decoded)
         dropout = self.dropout_layer(decoded)
         return mean, dispersion, dropout
+
+
+class ZINBVariationalAutoEnocder(ZINBAutoencoder):
+    def __init__(
+        self, 
+        input_size: int,
+        encoder_sizes: list[int],
+        bottleneck_size: int,
+        decoder_sizes: list[int],
+        dropout_rate: float = 0.1
+    ):
+        super().__init__(input_size, encoder_sizes, bottleneck_size, decoder_sizes, dropout_rate)
+        self.encoder_layers = self.encoder_layers[:-4]
+        self.encoder = nn.Sequential(*self.encoder_layers)
+
+        last_encoder_size = encoder_sizes[-1]
+        self.z_mean = nn.Linear(last_encoder_size, bottleneck_size)
+        self.z_log_var = nn.Linear(last_encoder_size, bottleneck_size)
+
+
+    def forward(self, x, size_factors):
+        encoded = self.encoder(x)
+        z_mean = self.z_mean(encoded)
+        z_log_var = self.z_log_var(encoded)
+        z = self.reparameterize(z_mean, z_log_var)
+        decoded = self.decoder(z)
+        mean = self.mean_layer(decoded) * size_factors
+        dispersion = self.dispersion_layer(decoded)
+        dropout = self.dropout_layer(decoded)
+        return mean, dispersion, dropout, z, z_mean, z_log_var
+    
+    def reparameterize(self, mu, log_var):
+        std = torch.exp(0.5 * log_var)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
 
 # Usage example:
 model = ZINBAutoencoder(
